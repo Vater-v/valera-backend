@@ -2,6 +2,69 @@ from models import ServerPacket, AccountInfo, GameData
 from session import GameSession
 
 class PacketRouter:
+    def to_dict(self, obj):
+        """Безопасно превращает Pydantic модель или dict в dict."""
+        if isinstance(obj, dict):
+            return obj
+        if hasattr(obj, "model_dump"): # Pydantic v2
+            return obj.model_dump()
+        if hasattr(obj, "dict"): # Pydantic v1
+            return obj.dict()
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
+        return {}
+
+    def check_turn_state(self, data: dict, session: GameSession):
+        """Анализирует состояние хода и выводит уведомления."""
+        if not session.is_in_game:
+            return
+
+        current_turn = data.get("currentTurn")
+        if not current_turn:
+            # Иногда turn лежит внутри gameState (например, при реконнекте)
+            game_state = data.get("gameState")
+            if game_state:
+                current_turn = game_state.get("currentTurn")
+
+        if not current_turn:
+            return
+
+        # Определяем, чей ход
+        owner_id = current_turn.get("ownerId") or current_turn.get("actionsActorId")
+        is_my_turn = (owner_id == session.hero_id)
+
+        phase = current_turn.get("phase", "UNKNOWN")
+        actions = current_turn.get("availableActions", [])
+
+        # --- ЛОГИКА ОТОБРАЖЕНИЯ ---
+        if is_my_turn:
+            print(f"\n🔔 >>> ВАШ ХОД! (Фаза: {phase}) <<<")
+
+            if "RollDice" in actions:
+                print("   🎲 НЕОБХОДИМО БРОСИТЬ КУБИКИ!")
+
+            if "DoublingOffer" in actions:
+                print("   🔥 ДОСТУПЕН ДАБЛ (УДВОЕНИЕ)!")
+
+            if "MoveChecker" in actions or phase == "CHECKERS_MOVEMENT":
+                print("   ♟  ХОДИТЕ ШАШКАМИ")
+
+            if "TurnCommit" in actions:
+                print("   ✅ ПОДТВЕРДИТЕ ХОД (COMMIT)")
+
+            if not actions and phase == "DOUBLING":
+                # Иногда actions пуст, но фаза удваивания требует ответа на дабл
+                print("   ⚠️  ЖДУТ РЕШЕНИЯ ПО ДАБЛУ (ПРИНЯТЬ/СДАТЬСЯ)")
+
+            # Отладочный вывод действий
+            # print(f"   [Debug] Доступно: {actions}")
+            print("-" * 30)
+
+        else:
+            # Ход оппонента (можно раскомментировать, если нужно следить)
+            # print(f"⏳ Ход оппонента... ({phase})")
+            pass
+
     def process(self, json_data: dict, session: GameSession):
         # 1. ПРОВЕРКА НА ПРОСТОЙ ЛОГИН
         if "login" in json_data and "id" in json_data:
@@ -11,7 +74,8 @@ class PacketRouter:
         # 2. ПАРСИНГ ПАКЕТА
         try:
             packet = ServerPacket(**json_data)
-        except Exception:
+        except Exception as e:
+            # print(f"Parse error: {e}")
             return
 
         # Нормализация
@@ -31,11 +95,10 @@ class PacketRouter:
         if pkt_type in ["StageChanged", "StageInfo"]:
             if payload.stage:
                 session.current_stage = payload.stage
-                # Если вышли из игры в лобби - сбрасываем флаг
                 if payload.stage == "Lobby":
                     session.is_in_game = False
 
-            # Попытка вытащить данные героя из контекста
+            # Данные пользователя
             if payload.context:
                 acc: AccountInfo = None
                 if payload.context.account_info:
@@ -47,53 +110,46 @@ class PacketRouter:
                     nick = acc.profile.nickname if acc.profile else None
                     session.update_hero(acc.id, acc.login, nick)
 
+                # Если мы подключились к игре (реконнект), проверим ситуацию
+                if payload.context.game_state:
+                    self.check_turn_state(payload.context.game_state, session)
+
         # Б. События игры
         elif pkt_type == "StageEvent":
             event = payload.name
 
-            # 1. Начало игры (самое важное событие)
+            # Превращаем data в словарь, чтобы не ловить ошибки .get()
+            raw_data = self.to_dict(payload.data) if payload.data else {}
+
+            # 1. Начало игры
             if event == "GameStarted":
-                # data автоматически парсится в GameData благодаря Pydantic,
-                # но нужно проверить, не dict ли это (на случай ошибок валидации)
-                data = payload.data
+                # Попробуем распарсить через модель для удобства, но для логики используем dict
+                data_obj = payload.data
 
-                # Если вдруг пришел dict (fallback), попробуем превратить в GameData
-                if isinstance(data, dict):
-                    try:
-                        data = GameData(**data)
-                    except:
-                        pass # Оставляем как dict
+                # Логика определения оппонента
+                if isinstance(data_obj, GameData) and data_obj.players:
+                    game_id = data_obj.game_id
+                    variant = data_obj.variant
 
-                # Извлекаем данные
-                if isinstance(data, GameData) and data.players:
-                    game_id = data.game_id
-                    variant = data.variant
-
-                    # Ставка
                     stake_val = "0"
                     currency = "chips"
-                    if data.stake:
-                        stake_val = data.stake.amount
-                        currency = data.stake.currency
+                    if data_obj.stake:
+                        stake_val = data_obj.stake.amount
+                        currency = data_obj.stake.currency
 
-                    # Определяем оппонента (тот, кто НЕ мы)
                     opp_id = "Unknown"
                     opp_name = "Unknown"
 
-                    # players - это словарь {"first": GamePlayer, "second": GamePlayer}
-                    for key, player in data.players.items():
-                        # player.user.account_id
+                    for key, player in data_obj.players.items():
                         p_id = player.user.account_id
                         if session.hero_id and p_id != session.hero_id:
                             opp_id = p_id
                             opp_name = player.user.username
                             break
-                        # Если наш ID еще не определен, берем второго как оппонента (эвристика)
                         elif not session.hero_id and key == "second":
                              opp_id = p_id
                              opp_name = player.user.username
 
-                    # Записываем в сессию
                     session.start_new_game(
                         game_id=game_id,
                         variant=variant,
@@ -103,13 +159,32 @@ class PacketRouter:
                         opponent_name=opp_name
                     )
 
-            # 2. Ваш ход (или ход оппонента)
-            elif event == "TurnStarted":
-                # Тут можно добавить логику проверки, чей ход
-                pass
+                # Сразу проверяем, чей первый ход
+                self.check_turn_state(raw_data, session)
+
+            # 2. Ход перешел или изменился
+            elif event in ["TurnStarted", "TurnCheckerMovedV2", "TurnCommitted", "DoublingOffer"]:
+                self.check_turn_state(raw_data, session)
 
             # 3. Бросок кубиков
             elif event == "DiceRolled":
-                dice = payload.data.get("firstDiceRoll") or payload.data.get("gameBoardState", {}).get("firstDice")
+                # Теперь raw_data - это словарь, .get работает безопасно
+                dice = raw_data.get("firstDiceRoll") or raw_data.get("gameBoardState", {}).get("firstDice")
+
+                # Бывает, что dice лежат в корне data (зависит от версии протокола)
+                if not dice and "dice" in raw_data:
+                    dice = raw_data["dice"]
+
                 if dice and session.is_in_game:
-                    print(f"🎲 Кубики: {dice['first']}:{dice['second']}")
+                    d1 = dice.get('first')
+                    d2 = dice.get('second')
+                    print(f"🎲 Кубики выпали: {d1}:{d2}")
+
+                # После броска нужно проверить, что делать дальше (ходить)
+                self.check_turn_state(raw_data, session)
+
+            # 4. Конец игры
+            elif event == "GameFinished":
+                session.is_in_game = False
+                winner = raw_data.get("gameResult", {}).get("winner", {}).get("accountInfo", {}).get("nickname", "Unknown")
+                print(f"\n🏁 ИГРА ОКОНЧЕНА. Победитель: {winner}\n")
