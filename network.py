@@ -1,11 +1,28 @@
 import socket
 import threading
 import json
+import datetime
 from session import GameSession
 from handlers import PacketRouter
 
 HOST = '0.0.0.0'
 PORT = 5006
+
+# Блокировка для записи в файл из разных потоков
+log_lock = threading.Lock()
+
+def log_to_jsonl(data: dict, ip: str, direction: str = "IN"):
+    """Записывает событие в файл traffic.jsonl"""
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "ip": ip,
+        "direction": direction,
+        "payload": data
+    }
+
+    with log_lock:
+        with open("traffic.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 def extract_json(text: str):
     """Ищет JSON-объект внутри строки, игнорируя мусор по краям"""
@@ -48,6 +65,11 @@ def handle_client(client_socket, address):
                         if json_str:
                             try:
                                 json_data = json.loads(json_str)
+
+                                # --- ЛОГИРОВАНИЕ ---
+                                log_to_jsonl(json_data, ip, direction="IN")
+                                # -------------------
+
                                 router.process(json_data, session)
                             except json.JSONDecodeError:
                                 pass # Битая строка, бывает
