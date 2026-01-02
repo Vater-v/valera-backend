@@ -110,6 +110,10 @@ class PacketRouter:
                     nick = acc.profile.nickname if acc.profile else None
                     session.update_hero(acc.id, acc.login, nick)
 
+                # Исправление: если нет полного профиля, берем ID из gameParticipantId
+                elif payload.context.game_participant_id:
+                    session.update_hero(uid=payload.context.game_participant_id)
+
                 # Если мы подключились к игре (реконнект), проверим ситуацию
                 if payload.context.game_state:
                     self.check_turn_state(payload.context.game_state, session)

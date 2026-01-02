@@ -54,6 +54,8 @@ class GameContext(BaseSchema):
     game_offers: Optional[List[GameOffer]] = Field(default=None, alias="gameOffers")
     game_params: Optional[GameParams] = Field(default=None, alias="gameParams")
     game_state: Optional[Dict[str, Any]] = Field(default=None, alias="gameState")
+    # Исправление: добавляем поле для идентификации игрока при смене стадии
+    game_participant_id: Optional[str] = Field(default=None, alias="gameParticipantId")
 
 class PacketPayload(BaseSchema):
     stage: Optional[str] = None
