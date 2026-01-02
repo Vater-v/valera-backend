@@ -1,43 +1,28 @@
 #!/bin/bash
 
-# Остановка при ошибках
-set -e
-
-# Проверка .env
+# Читаем .env
 if [ ! -f .env ]; then
     echo "Ошибка: файл .env не найден!"
     exit 1
 fi
-
-# Экспорт переменных
 export $(grep -v '^#' .env | xargs)
-
-# Проверка наличия переменных
-if [ -z "$GITHUB_USER" ] || [ -z "$GITHUB_TOKEN" ] || [ -z "$GIT_EMAIL" ] || [ -z "$GIT_NAME" ]; then
-    echo "Ошибка: Проверь .env! Не хватает GITHUB_USER, GITHUB_TOKEN, GIT_EMAIL или GIT_NAME."
-    exit 1
-fi
 
 echo "--- Начинаем синхронизацию ---"
 
-# --- Настройка Git (локально для этого репо) ---
+# Настройка (чтобы не ругался на email/name каждый раз)
 git config user.email "$GIT_EMAIL"
 git config user.name "$GIT_NAME"
 
 # 1. Добавляем файлы
 git add .
 
-# 2. Делаем коммит
+# 2. Коммит
+# "|| true" означает: если коммитить нечего (уже закоммитил), не падай, иди дальше к пушу
 COMMIT_MSG="${1:-Auto-update: $(date '+%Y-%m-%d %H:%M:%S')}"
-# Проверка: есть ли что коммитить?
-if git diff-index --quiet HEAD --; then
-    echo "Нет изменений для коммита."
-else
-    git commit -m "$COMMIT_MSG"
-fi
+git commit -m "$COMMIT_MSG" || true
 
-# 3. Пушим
+# 3. Пушим в ветку master
 echo "Заливаем на GitHub..."
-git push "https://${GITHUB_USER}:${GITHUB_TOKEN}@${REPO_URL}"
+git push "https://${GITHUB_USER}:${GITHUB_TOKEN}@${REPO_URL}" master
 
-echo "--- Успешно! ---"
+echo "--- Готово! ---"
